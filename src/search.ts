@@ -226,7 +226,9 @@ export class SearchIndex {
         }));
         const hits: SearchHit[] = [];
         for (const [path, entry] of this.content) {
-            if (!path.endsWith(".md")) continue;
+            // Mirror the ingest filter (GHSA-hfcr-mrh3-c584): the content map is
+            // only fed validated paths, so this is defense in depth, not a gate.
+            if (!isValidNotePath(path)) continue;
             if (prefix && !path.startsWith(prefix)) continue;
             if (q.tag && !this.getTags(path).includes(q.tag)) continue;
             const mtime = this.mtimes.get(path) ?? 0;

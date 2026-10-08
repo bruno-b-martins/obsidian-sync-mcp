@@ -120,12 +120,17 @@ await searchIndex.loadFromDisk();
 if (debugLogging) {
     console.log(`[debug] Persisted metadata: ${searchIndex.size} notes, since: ${searchIndex.since || "(none)"}`);
 }
-// The persisted file carries metadata only. A catch-up from its checkpoint
-// would leave every unchanged note without text, and search_notes would then
-// claim "caught up" while seeing a fraction of the vault. Start from zero.
+// The persisted file carries metadata (paths, mtimes, tags, links) but no note
+// text, since bodies are never written to disk. Keep that metadata serveable
+// right away — list_notes, tags and backlinks answer from the first request —
+// and re-read every body from sequence zero to repopulate the in-memory search
+// text. A from-zero _changes pass refreshes metadata and removes notes deleted
+// while the server was down, so nothing kept from disk goes stale. (Clearing
+// here instead would discard the metadata and leave list_notes empty on a
+// path-obfuscated vault until the full rebuild finishes.)
 if (searchIndex.size > 0 && searchIndex.contentCount < searchIndex.size) {
-    console.log(`Persisted index has metadata for ${searchIndex.size} notes but no content; rebuilding from scratch so search_notes covers every note.`);
-    searchIndex.clear();
+    console.log(`Persisted metadata for ${searchIndex.size} notes has no text; re-reading note bodies from the start so search_notes covers every note (metadata stays serveable meanwhile).`);
+    searchIndex.since = "0";
 }
 
 // Sync metadata in background (server starts immediately)
@@ -224,7 +229,11 @@ async function syncBeforeSearch(): Promise<{ unreadable: number; error?: string 
             searchIndex.lastSyncAt = Date.now();
             return { unreadable: stats.unreadable };
         } catch (err) {
-            return { unreadable: stats.unreadable, error: err instanceof Error ? err.message : String(err) };
+            // Log the detail (credentials redacted) server-side; the status line
+            // shown to the client gets a short reason, not a raw backend error
+            // that would disclose internal hostnames or URLs.
+            console.warn(`Pre-search catch-up failed: ${describeError(err, debugLogging)}`);
+            return { unreadable: stats.unreadable, error: "CouchDB sync error" };
         }
     };
     const result = syncChain.then(run, run);
