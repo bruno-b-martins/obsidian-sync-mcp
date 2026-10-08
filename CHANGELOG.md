@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.8.0
+
+### Features
+- **`search_notes` — find notes by what they say, not just their name.** `search_notes(terms, folder?, tag?, modified_after?, limit ≤ 20)` scans the text of your notes, which the server already keeps in memory, so there's no new dependency, no on-disk index, and note text is never written to disk. It runs a catch-up against CouchDB before each search so a result can never predate the vault, and opens with a status line describing what was searched. `terms` is OR over case-insensitive substrings; hits are ranked name-matches first, then by how many terms matched, then newest (#25). Contributed by @andreasd083.
+
+### Fixes
+- On restart the search index now keeps its persisted metadata (paths, tags, links, modified times) serveable from the first request and re-reads note bodies in the background, instead of discarding everything. Previously each restart wiped the metadata and left `list_notes` empty on a path-obfuscated vault until the full rebuild finished. Notes deleted while the server was down — including after a remote "Rebuild database" that leaves no tombstone — are reconciled on the next full catch-up, so they no longer linger in listings, and a transient CouchDB error at startup no longer discards the persisted metadata.
+- A failed pre-search catch-up is now logged in full on the server (with credentials redacted) and reported to the client as a short status-line reason, rather than passing a raw backend error — which could disclose an internal hostname or URL — back to the client.
+
+### Security
+- Bump `@modelcontextprotocol/sdk` to 1.32.1, clearing a high-severity advisory (GHSA-6qxp-vccf-f47h: an OAuth client could send credentials to an authorization server chosen by the MCP server).
+- Bump `proxy-addr` to 2.0.8, clearing a critical advisory (GHSA-jqcg-44mw-7w3h: IP spoofing via IPv4-mapped IPv6 trust subnets) (#46). Contributed by @bruno-b-martins.
+- `search_notes` filters its results through the same note-path validator as the write and listing paths (GHSA-hfcr-mrh3-c584), as defense in depth.
+
+### CI
+- Bump pinned GitHub Actions across the workflow (#45, Dependabot).
+
 ## 0.7.3
 
 ### Security
