@@ -183,12 +183,19 @@ export class Vault implements VaultBackend {
                         continue;
                     }
                 }
-                if (!isValidNotePath(path) && !meta.deleted) continue;
+                // A deletion doesn't need the body — the decrypted path is enough
+                // to remove the note. Short-circuit so a tombstone whose chunks were
+                // already purged still removes it instead of silently lingering.
+                if (meta.deleted) {
+                    if (isValidNotePath(path)) callback(path, null);
+                    continue;
+                }
+                if (!isValidNotePath(path)) continue;
                 const doc = await this.manipulator.getByMeta(meta).catch(() => null);
                 if (doc) {
                     Vault.docToChange(doc, callback);
-                } else if (stats && !meta.deleted) {
-                    // Chunks missing or undecryptable for a live note: same class of silent miss.
+                } else if (stats) {
+                    // Chunks missing or undecryptable for a live note: a silent miss.
                     stats.unreadable++;
                 }
             }

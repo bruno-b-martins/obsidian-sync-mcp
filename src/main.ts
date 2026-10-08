@@ -6,7 +6,7 @@ import { stat } from "fs/promises";
 import { setGlobalLogFunction, LEVEL_INFO } from "octagonal-wheels/common/logger";
 import { mountPasswordAuth, safeEqual } from "./auth.js";
 import { SearchIndex } from "./search.js";
-import { applyIndexChange } from "./index-sync.js";
+import { applyIndexChange, pruneGhosts } from "./index-sync.js";
 import { buildAllowedHosts, isHostAllowed, isOriginAllowed } from "./host-guard.js";
 import { readOnlyVault } from "./vault-readonly.js";
 import { registerTools } from "./tools.js";
@@ -138,39 +138,54 @@ async function rebuildIndex() {
     const start = performance.now();
 
     if (COUCHDB_URL && vault.catchUp) {
-        const changeCallback = (path: string, content: string | null, mtime?: number) => {
-            // content === "" is an empty-but-present note: index it, don't drop it.
-            applyIndexChange(searchIndex, path, content, mtime);
-        };
-
-        let since = searchIndex.since || "0";
+        const since = searchIndex.since || "0";
         if (debugLogging) console.log(`[debug] CouchDB catch-up from since: ${since}`);
         let changes = 0;
+        // Ghosts (notes that vanished while the server was down) can only be among
+        // the paths already loaded from the persisted file: a from-zero pass
+        // re-delivers every live note, so a loaded path it does not deliver is
+        // gone. A remote "Rebuild database" recreates the DB with no tombstones to
+        // replay, so this is the only way to catch those deletions. Snapshot the
+        // loaded paths up front and track which the pass re-delivers; limiting the
+        // prune to pre-existing paths means a note the live watcher adds mid-pass
+        // is never pruned.
+        const preexisting = new Set(searchIndex.listPaths());
+        const seen = new Set<string>();
+        let fromZero = since === "0";
         const onBatch = async (batchSince: string, processed: number) => {
             searchIndex.since = batchSince;
             await searchIndex.saveToDisk();
             console.log(`  checkpoint: ${processed} changes processed, ${searchIndex.size} notes indexed.`);
         };
+        const countingCallback = (path: string, content: string | null, mtime?: number) => {
+            changes++;
+            if (debugLogging) console.log(`[debug] Change: ${path} ${content !== null ? "(update)" : "(delete)"}`);
+            if (content !== null) seen.add(path); else seen.delete(path);
+            // content === "" is an empty-but-present note: index it, don't drop it.
+            applyIndexChange(searchIndex, path, content, mtime);
+        };
         try {
-            const countingCallback = (path: string, content: string | null, mtime?: number) => {
-                changes++;
-                if (debugLogging) console.log(`[debug] Change: ${path} ${content !== null ? "(update)" : "(delete)"}`);
-                changeCallback(path, content, mtime);
-            };
             const newSince = await vault.catchUp(since, countingCallback, onBatch);
             searchIndex.since = newSince;
             searchIndex.lastSyncAt = Date.now();
         } catch (err) {
-            console.warn(`Catch-up failed (${describeError(err, debugLogging)}), rebuilding index from scratch...`);
-            searchIndex.clear();
+            // Re-read from the start, but don't clear() first: a from-zero pass
+            // repopulates everything, and clearing would discard the still-serveable
+            // persisted metadata and — if this retry also fails — leave an empty
+            // index that the periodic save would then persist over the good copy.
+            console.warn(`Catch-up failed (${describeError(err, debugLogging)}), re-reading from the start...`);
             changes = 0;
-            const newSince = await vault.catchUp("0", (path, content, mtime) => {
-                changes++;
-                changeCallback(path, content, mtime);
-            }, onBatch);
+            seen.clear();
+            fromZero = true;
+            const newSince = await vault.catchUp("0", countingCallback, onBatch);
             searchIndex.since = newSince;
             searchIndex.lastSyncAt = Date.now();
         }
+        // Drop loaded paths a completed from-zero pass did not re-deliver. A note
+        // the watcher adds mid-pass is never pruned (it is not in `preexisting`);
+        // one the watcher re-adds between the pass and the prune is re-added by
+        // the next pre-search catch-up, so any race is self-correcting.
+        if (fromZero) pruneGhosts(searchIndex, preexisting, seen);
         if (changes > 0) {
             console.log(`Search index synced: ${changes} changes in ${((performance.now() - start) / 1000).toFixed(1)}s (${searchIndex.size} notes).`);
         } else {

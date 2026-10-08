@@ -35,3 +35,26 @@ export function applyIndexChange(index: IndexTarget, path: string, content: stri
         index.remove(path);
     }
 }
+
+/**
+ * After a completed from-zero catch-up, remove index entries for notes that
+ * vanished while the server was down (e.g. a remote "Rebuild database" that
+ * left no tombstones to replay). Only paths present before the pass
+ * (`preexisting`) that the pass did not re-deliver (`seen`) are dropped:
+ * restricting the prune to pre-existing paths means an entry the live watcher
+ * adds mid-pass is never pruned. Returns the removed paths.
+ */
+export function pruneGhosts(
+    index: Pick<IndexTarget, "remove">,
+    preexisting: Iterable<string>,
+    seen: ReadonlySet<string>,
+): string[] {
+    const removed: string[] = [];
+    for (const p of preexisting) {
+        if (!seen.has(p)) {
+            index.remove(p);
+            removed.push(p);
+        }
+    }
+    return removed;
+}
