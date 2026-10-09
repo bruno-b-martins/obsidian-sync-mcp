@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+- **LiveSync "independent ID derivation" is now supported (#47).** Vaults created with LiveSync 1.0.33+ and path obfuscation derive obfuscated document IDs from a saved key instead of the passphrase, so `read_note` and `get_note_metadata` — and writes — returned "Note not found" for every path. Set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from LiveSync's "Show current recovery code") and reads and writes resolve. Older passphrase-derived vaults are unaffected and need nothing set. Reported by @xXAngorXx.
+- Added `COUCHDB_CASE_SENSITIVE` to match LiveSync's "Handle filenames as case-sensitive" setting. It defaults to `false` (the LiveSync default); set it to `true` only if your vault uses that option.
+
+### Fixes
+- When a vault's obfuscated document IDs don't match the configured derivation scheme, the server now fails fast at startup with a message naming the setting to fix (`COUCHDB_ID_DERIVATION_KEY` or `COUCHDB_CASE_SENSITIVE`), instead of silently returning "Note not found" for every note.
+
+### Dependencies
+- Bump `livesync-commonlib` to 0.1.34 (adds configurable ID derivation) and `octagonal-wheels` to 0.1.54 (the keyed-ID crypto the new scheme needs).
+
+### Upgrade note
+- If your vault was created with LiveSync 1.0.33+ with path obfuscation, set `COUCHDB_ID_DERIVATION_KEY` to your recovery code — otherwise the server now refuses to start (with a clear message) rather than silently failing reads. If your vault uses LiveSync's non-default "Handle filenames as case-sensitive" option, set `COUCHDB_CASE_SENSITIVE=true`. Vaults on the older passphrase-derived scheme need no changes.
+
 ## 0.8.0
 
 ### Features
