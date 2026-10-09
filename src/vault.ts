@@ -12,6 +12,8 @@ import { clearHandlers } from "../lib/livesync-commonlib/src/replication/SyncPar
 import { parseFrontmatterAndLinks } from "./parse.js";
 import type { VaultBackend, NoteInfo, NoteListing } from "./vault-backend.js";
 import { validateNotePath, isValidNotePath } from "./note-path.js";
+import { deriveOrImportIdKey } from "../lib/livesync-commonlib/src/common/idDerivation.ts";
+import { idDerivationOptions } from "./id-derivation-config.js";
 import { deriveContent } from "./index-sync.js";
 import { classifyIds, type IdFormat } from "./id-format.js";
 import { checkDatabase } from "./couchdb-preflight.js";
@@ -23,6 +25,19 @@ export interface VaultConfig {
     database: string;
     passphrase?: string;
     obfuscatePaths?: boolean;
+    /**
+     * LiveSync "independent ID derivation" key, as the recovery code
+     * (`sls-id-v1:<hex>`) or a source string. Required to resolve paths to
+     * document IDs on vaults created with LiveSync 1.0.33+ that use the new
+     * keyed ID scheme. Leave unset for older (passphrase-derived) vaults.
+     */
+    idDerivationKey?: string;
+    /**
+     * Match LiveSync's "Handle filenames as case-sensitive" setting. Defaults
+     * to false (the plugin default). Set true only if your vault was created
+     * with that option on, otherwise obfuscated document IDs won't resolve.
+     */
+    caseSensitive?: boolean;
 }
 
 export class Vault implements VaultBackend {
@@ -31,13 +46,19 @@ export class Vault implements VaultBackend {
     private manipulator!: DirectFileManipulator;
     private passphrase: string | undefined;
     private config: VaultConfig;
+    // Resolved 64-hex ID key (from the recovery code / source string), or
+    // undefined for legacy passphrase-derived vaults. Set in init().
+    private idDerivationKey: string | undefined;
+    // Obfuscation actually in effect after reconciling with the database, which
+    // can differ from the configured value.
+    private obfuscatePathsEffective = false;
 
     constructor(config: VaultConfig) {
         this.config = config;
         this.passphrase = config.passphrase;
     }
 
-    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean): DirectFileManipulatorOptions {
+    private static buildOptions(config: VaultConfig, obfuscatePaths: boolean, idDerivationKey?: string): DirectFileManipulatorOptions {
         return {
             url: config.couchdbUrl,
             username: config.couchdbUser,
@@ -47,21 +68,56 @@ export class Vault implements VaultBackend {
             obfuscatePassphrase: obfuscatePaths ? config.passphrase : undefined,
             useEden: false,
             enableCompression: false,
-            handleFilenameCaseSensitive: false,
+            handleFilenameCaseSensitive: !!config.caseSensitive,
             doNotUseFixedRevisionForChunks: false,
+            ...idDerivationOptions(obfuscatePaths, idDerivationKey),
         };
     }
 
     async init(): Promise<void> {
+        // Normalize the recovery code / source string to the 64-hex key once.
+        if (this.config.idDerivationKey) {
+            this.idDerivationKey = await deriveOrImportIdKey(this.config.idDerivationKey);
+        }
+        this.obfuscatePathsEffective = !!this.config.obfuscatePaths;
         await checkDatabase({
             url: this.config.couchdbUrl,
             database: this.config.database,
             username: this.config.couchdbUser,
             password: this.config.couchdbPassword,
         });
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, !!this.config.obfuscatePaths));
-        await this.manipulator.ready.promise;
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, this.obfuscatePathsEffective, this.idDerivationKey));
+        await this.awaitManipulatorReady();
         await this.reconcileObfuscation();
+        if (this.idDerivationKey && !this.obfuscatePathsEffective) {
+            console.warn(
+                "Warning: COUCHDB_ID_DERIVATION_KEY is set but this vault does not use path obfuscation; " +
+                "the ID key only applies to obfuscated vaults and is ignored.",
+            );
+        }
+    }
+
+    /**
+     * Await the manipulator's readiness, translating the library's ID-mismatch
+     * error into actionable guidance. The library (0.1.34+) verifies at startup
+     * that sampled document IDs match the configured derivation, so a v1 vault
+     * with the wrong or missing key fails here instead of silently missing reads.
+     */
+    private async awaitManipulatorReady(): Promise<void> {
+        try {
+            await this.manipulator.ready.promise;
+        } catch (err) {
+            if (err instanceof Error && err.message.includes("do not match the configured ID key")) {
+                throw new Error(
+                    "Vault document IDs do not match the configured ID scheme. " +
+                    (this.idDerivationKey
+                        ? "COUCHDB_ID_DERIVATION_KEY is set but does not match this vault; paste the exact recovery code (sls-id-v1:...) from LiveSync's \"Show current recovery code\". "
+                        : "If this vault was created with LiveSync 1.0.33+ with path obfuscation, set COUCHDB_ID_DERIVATION_KEY to the LiveSync recovery code (sls-id-v1:...). ") +
+                    "If instead your LiveSync vault has \"Handle filenames as case-sensitive\" enabled, set COUCHDB_CASE_SENSITIVE=true to match it.",
+                );
+            }
+            throw err;
+        }
     }
 
     /**
@@ -98,9 +154,10 @@ export class Vault implements VaultBackend {
                 : "Warning: COUCHDB_OBFUSCATE_PROPERTIES=true but vault uses plaintext document IDs. " +
                   "Disabling path obfuscation automatically — set COUCHDB_OBFUSCATE_PROPERTIES=false to silence this warning.",
         );
+        this.obfuscatePathsEffective = actual;
         await this.manipulator.close();
-        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual));
-        await this.manipulator.ready.promise;
+        this.manipulator = new DirectFileManipulator(Vault.buildOptions(this.config, actual, this.idDerivationKey));
+        await this.awaitManipulatorReady();
     }
 
     /** Sample file-entry docs from the changes feed and classify their IDs. */
@@ -150,6 +207,7 @@ export class Vault implements VaultBackend {
         since: string,
         callback: (path: string, content: string | null, mtime?: number) => void,
         onBatch?: (since: string, processed: number) => Promise<void>,
+        stats?: { unreadable: number },
     ): Promise<string> {
         // Paginate _changes in batches to limit memory usage.
         const BATCH_SIZE = 50;
@@ -175,11 +233,28 @@ export class Vault implements VaultBackend {
                 // Decrypt path to check .md BEFORE fetching chunks (avoids loading large attachments)
                 let path = meta.path ?? "";
                 if (isPathProbablyObfuscated(path) && this.passphrase) {
-                    try { path = await decrypt(path, this.passphrase, false); } catch { continue; }
+                    try { path = await decrypt(path, this.passphrase, false); } catch {
+                        // Path could not be decrypted: the note is skipped and stays
+                        // invisible to the index. Counted so search_notes can say so.
+                        if (stats) stats.unreadable++;
+                        continue;
+                    }
                 }
-                if (!isValidNotePath(path) && !meta.deleted) continue;
+                // A deletion doesn't need the body — the decrypted path is enough
+                // to remove the note. Short-circuit so a tombstone whose chunks were
+                // already purged still removes it instead of silently lingering.
+                if (meta.deleted) {
+                    if (isValidNotePath(path)) callback(path, null);
+                    continue;
+                }
+                if (!isValidNotePath(path)) continue;
                 const doc = await this.manipulator.getByMeta(meta).catch(() => null);
-                if (doc) Vault.docToChange(doc, callback);
+                if (doc) {
+                    Vault.docToChange(doc, callback);
+                } else if (stats) {
+                    // Chunks missing or undecryptable for a live note: a silent miss.
+                    stats.unreadable++;
+                }
             }
 
             totalProcessed += result.results.length;

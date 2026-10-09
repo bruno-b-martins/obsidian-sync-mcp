@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+- **LiveSync "independent ID derivation" is now supported (#47).** Vaults created with LiveSync 1.0.33+ and path obfuscation derive obfuscated document IDs from a saved key instead of the passphrase, so `read_note` and `get_note_metadata` — and writes — returned "Note not found" for every path. Set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from LiveSync's "Show current recovery code") and reads and writes resolve. Older passphrase-derived vaults are unaffected and need nothing set. Reported by @xXAngorXx.
+- Added `COUCHDB_CASE_SENSITIVE` to match LiveSync's "Handle filenames as case-sensitive" setting. It defaults to `false` (the LiveSync default); set it to `true` only if your vault uses that option.
+
+### Fixes
+- When a vault's obfuscated document IDs don't match the configured derivation scheme, the server now fails fast at startup with a message naming the setting to fix (`COUCHDB_ID_DERIVATION_KEY` or `COUCHDB_CASE_SENSITIVE`), instead of silently returning "Note not found" for every note.
+
+### Dependencies
+- Bump `livesync-commonlib` to 0.1.34 (adds configurable ID derivation) and `octagonal-wheels` to 0.1.54 (the keyed-ID crypto the new scheme needs).
+
+### Upgrade note
+- If your vault was created with LiveSync 1.0.33+ with path obfuscation, set `COUCHDB_ID_DERIVATION_KEY` to your recovery code — otherwise the server now refuses to start (with a clear message) rather than silently failing reads. If your vault uses LiveSync's non-default "Handle filenames as case-sensitive" option, set `COUCHDB_CASE_SENSITIVE=true`. Vaults on the older passphrase-derived scheme need no changes.
+
+## 0.8.0
+
+### Features
+- **`search_notes` — find notes by what they say, not just their name.** `search_notes(terms, folder?, tag?, modified_after?, limit ≤ 20)` scans the text of your notes, which the server already keeps in memory, so there's no new dependency, no on-disk index, and note text is never written to disk. It runs a catch-up against CouchDB before each search so a result can never predate the vault, and opens with a status line describing what was searched. `terms` is OR over case-insensitive substrings; hits are ranked name-matches first, then by how many terms matched, then newest (#25). Contributed by @andreasd083.
+
+### Fixes
+- On restart the search index now keeps its persisted metadata (paths, tags, links, modified times) serveable from the first request and re-reads note bodies in the background, instead of discarding everything. Previously each restart wiped the metadata and left `list_notes` empty on a path-obfuscated vault until the full rebuild finished. Notes deleted while the server was down — including after a remote "Rebuild database" that leaves no tombstone — are reconciled on the next full catch-up, so they no longer linger in listings, and a transient CouchDB error at startup no longer discards the persisted metadata.
+- A failed pre-search catch-up is now logged in full on the server (with credentials redacted) and reported to the client as a short status-line reason, rather than passing a raw backend error — which could disclose an internal hostname or URL — back to the client.
+
+### Security
+- Bump `@modelcontextprotocol/sdk` to 1.32.1, clearing a high-severity advisory (GHSA-6qxp-vccf-f47h: an OAuth client could send credentials to an authorization server chosen by the MCP server).
+- Bump `proxy-addr` to 2.0.8, clearing a critical advisory (GHSA-jqcg-44mw-7w3h: IP spoofing via IPv4-mapped IPv6 trust subnets) (#46). Contributed by @bruno-b-martins.
+- `search_notes` filters its results through the same note-path validator as the write and listing paths (GHSA-hfcr-mrh3-c584), as defense in depth.
+
+### CI
+- Bump pinned GitHub Actions across the workflow (#45, Dependabot).
+
 ## 0.7.3
 
 ### Security
