@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.9.0
+
+### Features
+- **LiveSync "independent ID derivation" is now supported (#47).** Vaults created with LiveSync 1.0.33+ and path obfuscation derive obfuscated document IDs from a saved key instead of the passphrase, so `read_note` and `get_note_metadata` — and writes — returned "Note not found" for every path. Set `COUCHDB_ID_DERIVATION_KEY` to your LiveSync recovery code (`sls-id-v1:...`, from LiveSync's "Show current recovery code") and reads and writes resolve. Older passphrase-derived vaults are unaffected and need nothing set. Reported by @xXAngorXx.
+- Added `COUCHDB_CASE_SENSITIVE` to match LiveSync's "Handle filenames as case-sensitive" setting. It defaults to `false` (the LiveSync default); set it to `true` only if your vault uses that option.
+
+### Fixes
+- When a vault's obfuscated document IDs don't match the configured derivation scheme, the server now fails fast at startup with a message naming the setting to fix (`COUCHDB_ID_DERIVATION_KEY` or `COUCHDB_CASE_SENSITIVE`), instead of silently returning "Note not found" for every note.
+
+### Dependencies
+- Bump `livesync-commonlib` to 0.1.34 (adds configurable ID derivation) and `octagonal-wheels` to 0.1.54 (the keyed-ID crypto the new scheme needs).
+
+### Upgrade note
+- If your vault was created with LiveSync 1.0.33+ with path obfuscation, set `COUCHDB_ID_DERIVATION_KEY` to your recovery code — otherwise the server now refuses to start (with a clear message) rather than silently failing reads. If your vault uses LiveSync's non-default "Handle filenames as case-sensitive" option, set `COUCHDB_CASE_SENSITIVE=true`. Vaults on the older passphrase-derived scheme need no changes.
+
+## 0.8.0
+
+### Features
+- **`search_notes` — find notes by what they say, not just their name.** `search_notes(terms, folder?, tag?, modified_after?, limit ≤ 20)` scans the text of your notes, which the server already keeps in memory, so there's no new dependency, no on-disk index, and note text is never written to disk. It runs a catch-up against CouchDB before each search so a result can never predate the vault, and opens with a status line describing what was searched. `terms` is OR over case-insensitive substrings; hits are ranked name-matches first, then by how many terms matched, then newest (#25). Contributed by @andreasd083.
+
+### Fixes
+- On restart the search index now keeps its persisted metadata (paths, tags, links, modified times) serveable from the first request and re-reads note bodies in the background, instead of discarding everything. Previously each restart wiped the metadata and left `list_notes` empty on a path-obfuscated vault until the full rebuild finished. Notes deleted while the server was down — including after a remote "Rebuild database" that leaves no tombstone — are reconciled on the next full catch-up, so they no longer linger in listings, and a transient CouchDB error at startup no longer discards the persisted metadata.
+- A failed pre-search catch-up is now logged in full on the server (with credentials redacted) and reported to the client as a short status-line reason, rather than passing a raw backend error — which could disclose an internal hostname or URL — back to the client.
+
+### Security
+- Bump `@modelcontextprotocol/sdk` to 1.32.1, clearing a high-severity advisory (GHSA-6qxp-vccf-f47h: an OAuth client could send credentials to an authorization server chosen by the MCP server).
+- Bump `proxy-addr` to 2.0.8, clearing a critical advisory (GHSA-jqcg-44mw-7w3h: IP spoofing via IPv4-mapped IPv6 trust subnets) (#46). Contributed by @bruno-b-martins.
+- `search_notes` filters its results through the same note-path validator as the write and listing paths (GHSA-hfcr-mrh3-c584), as defense in depth.
+
+### CI
+- Bump pinned GitHub Actions across the workflow (#45, Dependabot).
+
+## 0.7.3
+
+### Security
+- **Note tools are now restricted to real vault note paths (GHSA-hfcr-mrh3-c584).** Write, move, and delete accepted any path, so a prompt-injected agent could overwrite LiveSync control files (e.g. `redflag.md`, `flag_rebuild.md`) and trigger a vault-wide rebuild or fetch, or escape the vault via `..`, dot-folders (`.obsidian`), absolute paths, or symlinks. All note operations in both the CouchDB and local-filesystem backends now go through a shared validator that requires a vault-relative `.md` path and rejects traversal, hidden folders, and the reserved control files; listings apply the same filter so what you can see matches what you can touch. Reported by @bruno-b-martins.
+- **The OAuth consent page now shows the redirect destination (GHSA-49hr-4pv9-75q6).** The password approval page never displayed where the authorization code would be sent, so a victim could be phished into approving a malicious client and handing an attacker a code redeemable for full vault access. The page now shows the destination host and the self-reported client name, with a warning to only enter the password for a recognized destination. Reported by @bruno-b-martins.
+
+### Fixes
+- The server never creates the CouchDB database and fails fast with a clear message if it is missing, empty, or unreachable, instead of silently connecting to a database PouchDB would have created (#39). Contributed by @bruno-b-martins.
+
+### Deploy
+- The `docker-compose` stack now creates the database before the MCP server starts via a one-shot `db-init` service, so a first run still works now that the server no longer auto-creates it.
+
+## 0.7.2
+
+### Security
+- Credentials embedded in `COUCHDB_URL` are now redacted from all logs, at every level — including the raw `Error` objects the sync library logs — so `user:pass@host` no longer leaks into container logs (#37). Contributed by @bruno-b-martins.
+
+### Fixes
+- The static token and the OAuth password/CSRF comparisons hash both sides before the constant-time check, so a non-ASCII `Authorization` header or a missing password field now returns a clean 401 instead of throwing (previously a malformed 401 without `WWW-Authenticate`, or a 500) (#36). Contributed by @bruno-b-martins.
+- `READ_ONLY` is now enforced in the vault backend as well as by hiding the write tools, so a write can't slip through a code path that bypasses the tools (#38). Contributed by @bruno-b-martins.
+
+### CI
+- Workflows run with least-privilege permissions (read-only by default; publish jobs request only what they need), every action is pinned to a commit SHA, oxlint is pinned to a fixed version, and the published image gets a build-provenance attestation; a Dependabot config keeps the pins current (#42). Contributed by @bruno-b-martins.
+
+### Docs
+- `SECURITY.md` corrected to match the code: accurate token-persistence timing and CORS origins, and the metadata-index description now reflects reality (the stale FlexSearch and 50-match-cap text is gone) (#43). Contributed by @bruno-b-martins.
+
 ## 0.7.1
 
 ### Security

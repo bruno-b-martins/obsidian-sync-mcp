@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { deriveContent, applyIndexChange, type IndexTarget } from "./index-sync.js";
+import { deriveContent, applyIndexChange, pruneGhosts, type IndexTarget } from "./index-sync.js";
 
 /**
  * Regression tests for zero-byte notes being dropped from the search index
@@ -63,5 +63,39 @@ describe("applyIndexChange — routing", () => {
         ];
         for (const [path, content] of changes) applyIndexChange(index, path, content);
         assert.equal(index.size, 4, `expected all 4 notes indexed, got ${index.size}`);
+    });
+});
+
+describe("pruneGhosts — remove notes that vanished with no tombstone", () => {
+    let index: FakeIndex;
+    beforeEach(() => { index = new FakeIndex(); });
+
+    it("removes a loaded path the from-zero pass did not re-deliver", () => {
+        index.update("ghost.md"); // persisted, now gone from the DB (no tombstone)
+        index.update("live.md");
+        const preexisting = ["ghost.md", "live.md"];
+        const seen = new Set(["live.md"]); // only live.md re-delivered
+        const removed = pruneGhosts(index, preexisting, seen);
+        assert.deepEqual(removed, ["ghost.md"]);
+        assert.ok(!index.has("ghost.md"), "ghost should be pruned");
+        assert.ok(index.has("live.md"), "re-delivered note should stay");
+    });
+
+    it("never prunes a note the watcher added mid-pass (not in preexisting)", () => {
+        // The invariant that keeps the prune safe against the concurrent watcher.
+        index.update("fresh.md"); // added by the watcher during the pass
+        const preexisting: string[] = []; // it was not loaded from disk
+        const seen = new Set<string>(); // nor re-delivered by this pass
+        const removed = pruneGhosts(index, preexisting, seen);
+        assert.deepEqual(removed, []);
+        assert.ok(index.has("fresh.md"), "watcher-added note must not be pruned");
+    });
+
+    it("keeps everything when the pass re-delivered every loaded path", () => {
+        index.update("a.md");
+        index.update("b.md");
+        const removed = pruneGhosts(index, ["a.md", "b.md"], new Set(["a.md", "b.md"]));
+        assert.deepEqual(removed, []);
+        assert.equal(index.size, 2);
     });
 });
