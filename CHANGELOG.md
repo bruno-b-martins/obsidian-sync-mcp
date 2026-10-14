@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.0
+
+This release hardens the default Docker and docker-compose deployment and speeds up startup on large CouchDB vaults. **It contains breaking changes to the Docker/compose defaults** — see the upgrade note.
+
+### Security
+- docker-compose now **requires** `MCP_AUTH_TOKEN` and publishes the MCP port on `127.0.0.1` only. Previously the token defaulted to empty and the port bound all interfaces, which could leave an unauthenticated vault reachable from other machines (#40). Contributed by @bruno-b-martins.
+- The published Docker image runs as the unprivileged `node` user (uid 1000) instead of root, and pins its base image by digest (#41). Contributed by @bruno-b-martins.
+- Dependency install scripts no longer run during the image build or in CI (`npm ci --ignore-scripts`); no runtime dependency needs them (#41). Contributed by @bruno-b-martins.
+
+### Performance
+- The CouchDB change watcher now starts after the initial index catch-up instead of at boot, so it no longer replays the whole `_changes` feed from the beginning alongside the catch-up. On large vaults this roughly halves startup time (a 3379-note vault dropped from ~815s to about half). No change is missed: the catch-up drains to the live sequence and the watcher resumes from there (#50).
+
+### CI
+- Bump pinned GitHub Actions (#49, Dependabot).
+
+### Upgrade note
+- **docker-compose:** add `MCP_AUTH_TOKEN` to your `.env` — compose now refuses to start without it. The port is bound to `localhost`; to reach the server from another machine, put an HTTPS tunnel or reverse proxy in front (see the README) and set `BASE_URL` to its public URL.
+- **Docker image (non-root):** the container now runs as uid 1000, so a data volume created by an older root-running image must be made writable once. Named volume: `docker run --rm -v mcp-data:/data alpine chown -R 1000:1000 /data`; for a bind mount, `chown -R 1000:1000` the host directory. Fly.io deployments are unaffected (the deploy images keep root for the mounted volume).
+
 ## 0.9.0
 
 ### Features
